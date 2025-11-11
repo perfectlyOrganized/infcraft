@@ -9,11 +9,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
-import java.util.concurrent.ExecutionException;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.perfectlyorganized.infcraft.Util.ItemData;
 
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.network.chat.Component;
@@ -39,28 +37,28 @@ public class ItemWatcher {
     private static boolean processing = false;
   
     @SuppressWarnings("null")
-    private static Optional<Tuple<ItemData, ItemData>> getClosestItems(List<ItemData> items) {
-        List<ItemData> shiftedList = new ArrayList<>(items);
+    private static Optional<Tuple<ItemEntity, ItemEntity>> getClosestItems(List<ItemEntity> items) {
+        List<ItemEntity> shiftedList = new ArrayList<>(items);
         Collections.rotate(shiftedList, 1);
         for (int i = 0; i < items.size(); i++) {
-            ItemData item = items.get(i);
-            ItemData nextItem = shiftedList.get(i);
-            if (item.itemId.equals(nextItem.itemId)) {
+            ItemEntity item = items.get(i);
+            ItemEntity nextItem = shiftedList.get(i);
+            if (Util.getItemId(item).equals(Util.getItemId(nextItem))) {
                 continue;
             }
-            double dx = item.x - nextItem.x;
+            double dx = item.getX() - nextItem.getX();
             if (Math.abs(dx) >= 1.0) continue;
-            double dy = item.y - nextItem.y;
+            double dy = item.getY() - nextItem.getY();
             if (Math.abs(dy) >= 1.0) continue;
-            double dz = item.z - nextItem.z;
+            double dz = item.getZ() - nextItem.getZ();
             if (Math.abs(dz) >= 1.0) continue;
 
             double distance_squared = (dx * dx) + (dy * dy) + (dz * dz);
             if (distance_squared < 1) {
-                List<ItemData> match = new ArrayList<>();
+                List<ItemEntity> match = new ArrayList<>();
                 match.add(item);
                 match.add(nextItem);
-                match.sort((a, b) -> a.itemId.compareTo(b.itemId));
+                match.sort((a, b) -> Util.getItemId(a).compareTo(Util.getItemId(b)));
 
                 return Optional.ofNullable(new Tuple<>(match.get(0), match.get(1)));
             }
@@ -81,21 +79,20 @@ public class ItemWatcher {
                 }
                 processing = true;
                
-                List<ItemData> items = Util.getAllLoadedItems();
+                List<ItemEntity> items = Util.getAllLoadedItems(Optional.ofNullable(Config.inputBlacklist));
                 if (items.isEmpty()) {
                     processing = false;
                     return;
                 }
-                Optional<Tuple<ItemData, ItemData>> combinationOrOptional = getClosestItems(items);
+                Optional<Tuple<ItemEntity, ItemEntity>> combinationOrOptional = getClosestItems(items);
                 if (!combinationOrOptional.isPresent()) {
                     processing = false;
                     return;
                 }
 
-                Tuple<ItemData, ItemData> combination = combinationOrOptional.get();
+                Tuple<ItemEntity, ItemEntity> combination = combinationOrOptional.get();
                 
-                String saveString = combination.getA().getCombinationString() + ", " + combination.getB().getCombinationString();
-                boolean saved = false;
+                String saveString = Util.getCombinationString(combination.getA()) + ", " + Util.getCombinationString(combination.getB());
                 Optional<AIResponse> itemResult = Optional.empty();
                 try {
                     Path path = Config.infcraftDir.resolve("combinations.txt");
@@ -104,21 +101,22 @@ public class ItemWatcher {
                         int index = combinations.indexOf(saveString);
                         String result = combinations.get(index + 1);
                         itemResult = Optional.ofNullable(builder.fromJson(result, AIResponse.class));
-                        saved = true;
                     }
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
 
                 if (!itemResult.isPresent()) {
-                    if (Math.random() < 0.01) {
+                    if (Math.random() < Config.chanceOfRandom) {
                         itemResult = Optional.ofNullable(Util.getRandomItemResult());
                     } else {
-                        try {
-                            itemResult = Ai.callAPI(saveString).get();
-                        } catch (InterruptedException | ExecutionException e) {
-                                e.printStackTrace();
-                        }
+                        Ai.callAPI(saveString).thenAccept(result -> {
+                            if (result.isPresent()) {
+                                replaceItems(result.get(), combination, saveString, false);
+                            }
+                            processing = false;
+                        });
+                        return;
                     }
                 }
 
@@ -127,47 +125,50 @@ public class ItemWatcher {
                     return;
                 }
                 AIResponse result = itemResult.get();
-                try {
-                    Path path = Config.infcraftDir.resolve("combinations.txt");
-                    List<String> combinations = Files.readAllLines(path);
-                    if (!combinations.contains(saveString)) {
-                        combinations.add(saveString);
-                        combinations.add(builder.toJson(result));
-                        Files.write(path, combinations);
-                    }
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
 
-                ServerLevel level = (ServerLevel) combination.getA().entity.level();
-                ResourceLocation location = ResourceLocation.parse(result.id);
-                Item item = ForgeRegistries.ITEMS.getValue(location);
-                double x = combination.getA().x;
-                double y = combination.getA().y;
-                double z = combination.getA().z;
-                if (item != null) {
-                    ItemStack stack = new ItemStack(item, result.count);
-                    ItemEntity itemEntity = new ItemEntity(level, x, y, z, stack);
-                    combination.getA().entity.discard();
-                    combination.getB().entity.discard();
-                    itemEntity.setDefaultPickUpDelay();
-                    level.addFreshEntity(itemEntity);
-                    level.sendParticles(ParticleTypes.POOF, x, y, z, 4, 0.5, 0.5, 0.5, 0.02);
-                    Random rand = new Random();
-                    float pitch = ((rand.nextInt(10))/10) + 1;
-                    itemEntity.playSound(SoundEvents.ENDER_EYE_DEATH, 0.8f, pitch);
-
-                    MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
-                    if (server != null && !saved && result.reason != null) {
-                        server.getPlayerList().broadcastSystemMessage(Component.literal(result.reason), false);
-                    }
-                }
+                replaceItems(result, combination, saveString, true);
                 processing = false;
             }
         }
     }
 
-  
+    public static void replaceItems(AIResponse result, Tuple<ItemEntity, ItemEntity> combination, String saveString, Boolean saved) {
+        try {
+            Path path = Config.infcraftDir.resolve("combinations.txt");
+            List<String> combinations = Files.readAllLines(path);
+            if (!combinations.contains(saveString)) {
+                combinations.add(saveString);
+                combinations.add(builder.toJson(result));
+                Files.write(path, combinations);
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        ServerLevel level = (ServerLevel) combination.getA().level();
+        ResourceLocation location = ResourceLocation.parse(result.id);
+        Item item = ForgeRegistries.ITEMS.getValue(location);
+        double x = combination.getA().getX();
+        double y = combination.getA().getY();
+        double z = combination.getA().getZ();
+        if (item != null) {
+            ItemStack stack = new ItemStack(item, result.count);
+            ItemEntity itemEntity = new ItemEntity(level, x, y, z, stack);
+            combination.getA().discard();
+            combination.getB().discard();
+            itemEntity.setDefaultPickUpDelay();
+            level.addFreshEntity(itemEntity);
+            level.sendParticles(ParticleTypes.POOF, x, y, z, 4, 0.5, 0.5, 0.5, 0.02);
+            Random rand = new Random();
+            float pitch = ((rand.nextInt(10))/10) + 1;
+            itemEntity.playSound(SoundEvents.ENDER_EYE_DEATH, 0.8f, pitch);
+
+            MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+            if (server != null && !saved && result.reason != null) {
+                server.getPlayerList().broadcastSystemMessage(Component.literal(result.reason), false);
+            }
+        }
+    }
 }
 
 class AIResponse {

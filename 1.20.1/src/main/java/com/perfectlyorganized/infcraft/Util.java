@@ -1,11 +1,12 @@
 package com.perfectlyorganized.infcraft;
 
+import net.minecraft.world.effect.MobEffect;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraftforge.registries.ForgeRegistries;
 import net.minecraftforge.server.ServerLifecycleHooks;
-import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -14,9 +15,11 @@ import net.minecraft.world.item.ItemStack;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import java.util.UUID;
+import java.util.Optional;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class Util {
@@ -25,9 +28,14 @@ public class Util {
      * @param level The current world level
      * @return List of all loaded item entities with their data
      */
-    public static List<ItemData> getAllLoadedItems() {
+    public static List<ItemEntity> getAllLoadedItems(Optional<List<? extends String>> wordBlacklist) {
+        List<Pattern> blacklistPatterns = wordBlacklist.orElseGet(Collections::emptyList).stream()
+        .map(String::toLowerCase)
+        .map(word -> Pattern.compile("\\b" + Pattern.quote(word) + "\\b"))
+        .collect(Collectors.toList());
+        
         MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
-        List<ItemData> items = new ArrayList<>();
+        List<ItemEntity> items = new ArrayList<>();
         if (server == null) {
             InfCraft.LOGGER.info("Server is null");
             return items;
@@ -36,32 +44,56 @@ public class Util {
         for (ServerLevel level : server.getAllLevels()) {
             getItemsInLevel(items, level);
         }
+
+        items = items.stream()
+        .filter(item -> {
+            String displayName = getItemDisplayName(item.getItem().getItem()).toLowerCase();
+            return blacklistPatterns.stream()
+                .noneMatch(pattern -> pattern.matcher(displayName).find());
+        })
+        .collect(Collectors.toList());
         return items;
     }
     
-    private static void getItemsInLevel(List<ItemData> items,ServerLevel level) {
+    private static void getItemsInLevel(List<ItemEntity> items,ServerLevel level) {
         Iterable<Entity> entities = level.getAllEntities();
         for (Entity entity : entities) {
             if (entity instanceof ItemEntity) {
                 ItemEntity itemEntity = (ItemEntity) entity;
                 if (itemEntity.isAlive()) {
-                    ItemData data = new ItemData(itemEntity);
-                    
-                    items.add(data);
+                    items.add(itemEntity);
                 }
             }
         }
     }
    
-    public static String getAllItems() {
-        Collection<Item> allItems = ForgeRegistries.ITEMS.getValues().stream()
-        .filter(Objects::nonNull) // Filter out null items
+    public static Collection<MobEffect> getAllPotionEffects() {
+        MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+
+        return server.registryAccess()
+            .registryOrThrow(Registries.MOB_EFFECT)
+            .stream()
+            .collect(Collectors.toList());
+    }
+    public static String getAllItems(Optional<List<? extends String>> wordBlacklist) {
+        List<Pattern> blacklistPatterns = wordBlacklist.orElseGet(Collections::emptyList).stream()
+        .map(String::toLowerCase)
+        .map(word -> Pattern.compile("\\b" + Pattern.quote(word) + "\\b"))
         .collect(Collectors.toList());
         
-        StringBuilder output = new StringBuilder();
+        Collection<Item> allItems = ForgeRegistries.ITEMS.getValues().stream()
+        .filter(Objects::nonNull) // Filter out null items
+        .filter(item -> {
+            String displayName = getItemDisplayName(item).toLowerCase();
+            return blacklistPatterns.stream()
+                .noneMatch(pattern -> pattern.matcher(displayName).find());
+        })
+        .collect(Collectors.toList());
         
-        for (Item item : allItems) {
-            @SuppressWarnings("null")
+        List<Item> shuffledItems = new ArrayList<>(allItems);
+        Collections.shuffle(shuffledItems);
+        StringBuilder output = new StringBuilder();
+        for (Item item : shuffledItems) {
             ResourceLocation registryName = ForgeRegistries.ITEMS.getKey(item);
             if (registryName != null) {
                 String namespace = registryName.getNamespace();
@@ -71,8 +103,10 @@ public class Util {
                 output.append(String.format("%s:%s, %s\n", namespace, itemId, displayName));
             }
         }
+
         return output.toString();
     }
+
     public static AIResponse getRandomItemResult() {
         List<Item> allItems = ForgeRegistries.ITEMS.getValues().stream()
         .filter(Objects::nonNull) // Filter out null items
@@ -96,46 +130,21 @@ public class Util {
             return "Unknown Name";
         }
     }
-   
-    public static class ItemData {
-        public final ItemEntity entity;
-        public final BlockPos blockPos;
-        public final ItemStack itemStack;
-        public final double x;
-        public final double y;
-        public final double z;
-        public final String itemName;
-        public final int count;
-        public final UUID uuid;
-        public final String itemId;
-        
-        public ItemData(ItemEntity entity) {
-            this.entity = entity;
-            this.blockPos = entity.blockPosition();
-            this.itemStack = entity.getItem();
-
-            this.x = Math.round(entity.getX() * 2) / 2.0;
-            this.y = Math.round(entity.getY() * 2) / 2.0;
-            this.z = Math.round(entity.getZ() * 2) / 2.0;
-            this.uuid = entity.getUUID();
-            ResourceLocation registryName = ForgeRegistries.ITEMS.getKey(itemStack.getItem());
-            this.itemId = registryName.getNamespace() + ":" + registryName.getPath();
-            this.itemName = itemStack.getHoverName().getString();
-            this.count = itemStack.getCount();
-        }
-                      
-        @Override
-        public String toString() {
-            return String.format("{\"x\": %.1f, \"y\": %.1f, \"z\": %.1f, \"name\": \"%s\", \"id\": \"%s\", \"count\": %d, \"uuid\": \"%s\"}",
-                x, y, z, itemName, itemId, count, uuid.toString());
-        }
-        public String getCombinationString() {
-            return String.format("{\"name\": \"%s\", \"id\": \"%s\", \"count\": %d}",
-                itemName, itemId, count);
-        }
+    public static String getItemId(ItemEntity entity) {
+        ResourceLocation registryName = ForgeRegistries.ITEMS.getKey(entity.getItem().getItem());
+        return registryName.getNamespace() + ":" + registryName.getPath();
+    }
+    public static String getItemId(Item item) {
+        ResourceLocation registryName = ForgeRegistries.ITEMS.getKey(item);
+        return registryName.getNamespace() + ":" + registryName.getPath();
     }
 
-
+    public static String getCombinationString(ItemEntity itemEntity) {
+        return String.format("{\"name\": \"%s\", \"id\": \"%s\", \"count\": %d}",
+            itemEntity.getItem().getHoverName().getString(),
+            getItemId(itemEntity.getItem().getItem()),
+            itemEntity.getItem().getCount());
+    }
     public static Holder<Item> getItemById(String id) {
         return ForgeRegistries.ITEMS.getHolder(ResourceLocation.parse(id)).orElse(null);
     }

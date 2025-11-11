@@ -16,12 +16,13 @@ import com.google.gson.JsonParser;
 
 public class Ai {
     private static Gson builder = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().serializeNulls().create();
-    private static final int MAX_RETRIES = 3;
+    private static final int MAX_RETRIES = 4;
     private static final Duration RETRY_DELAY = Duration.ofSeconds(2);
-    private static final String URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=";
+    private static final String URL = "https://generativelanguage.googleapis.com/v1beta/models/" + Config.aiModel + ":generateContent?key=";
     public static CompletableFuture<Optional<AIResponse>> callAPI(String saveString) {
         if (Config.geminiAPIToken == null || Config.geminiAPIToken.trim().isEmpty()) {
-            throw new IllegalStateException("Gemini API key is not configured! Check your config file.");
+            InfCraft.LOGGER.warn("Gemini API key is not configured! Check your config file.");
+            return CompletableFuture.completedFuture(Optional.empty());
         }
         
         return callAPIWithRetry(saveString, new AtomicInteger(0));
@@ -100,6 +101,7 @@ public class Ai {
                 }]
             }],
             "generationConfig": {
+                "temperature": %s,
                 "candidateCount": 1,
                 "thinkingConfig": {
                     "thinkingBudget": 0
@@ -125,7 +127,7 @@ public class Ai {
                 }
             }
         }
-        """.formatted(escapeJson(saveString), escapeJson(Config.prompt + "\n" + Util.getAllItems()));
+        """.formatted(escapeJson(Config.prompt + "\n" + Util.getAllItems(Optional.of(Config.outputBlacklist))), escapeJson(saveString), Config.aiTemperature);
     }
 
     private static String escapeJson(String text) {
